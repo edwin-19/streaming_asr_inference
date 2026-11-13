@@ -1,0 +1,166 @@
+
+# services:
+#   asr-gateway:
+#     build:
+#       context: .
+#       dockerfile: deploy/Dockerfile.gateway
+#     container_name: asr-gateway
+#     restart: unless-stopped
+
+#     network_mode: host
+
+#     environment:
+#       PYTHONUNBUFFERED: "1"
+#       PYTHONPATH: "/app"
+
+#       GATEWAY_HOST: "0.0.0.0"
+#       GATEWAY_PORT: "${GATEWAY_PORT:-8090}"
+
+#       RAY_ADDRESS: "${RAY_ADDRESS:?RAY_ADDRESS must be configured}"
+#       RAY_NAMESPACE: "${RAY_NAMESPACE:-default}"
+#       SERVE_APP_NAME: "${SERVE_APP_NAME:-default}"
+
+#       RAY_AUTH_MODE: "token"
+#       RAY_AUTH_TOKEN: "${RAY_AUTH_TOKEN:?Set RAY_AUTH_TOKEN}"
+
+#       VAD_USE_GPU: "${VAD_USE_GPU:-false}"
+#       VAD_MODEL_DIR: "/app/pretrained_models/FireRedVAD/Stream-VAD"
+
+#     volumes:
+#       - /dev/shm:/dev/shm
+
+#     secrets:
+#       - ray_auth_token
+
+#     deploy:
+#       resources:
+#         limits:
+#           cpus: "${GATEWAY_CPU_LIMIT:-4}"
+#           memory: "${GATEWAY_MEMORY_LIMIT:-8G}"
+
+#     healthcheck:
+#       test:
+#         - CMD
+#         - python
+#         - -c
+#         - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${GATEWAY_PORT:-8090}/health', timeout=5)"
+#       interval: 30s
+#       timeout: 10s
+#       retries: 3
+#       start_period: 60s
+
+# secrets:
+#   ray_auth_token:
+#     file: "${RAY_AUTH_TOKEN_FILE:?RAY_AUTH_TOKEN_FILE must be configured}"
+
+
+services:
+  asr-engine:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.asr
+      args:
+        VLLM_TAG: "${VLLM_TAG:-v0.18.0}"
+
+    container_name: asr-engine
+    hostname: asr-engine
+    restart: unless-stopped
+    init: true
+
+    # GPU access
+    gpus: all
+    ipc: host
+    shm_size: "8gb"
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: "/app"
+      HF_HOME: "/root/.cache/huggingface"
+
+      # Isolated Ray cluster inside Compose
+      RAY_ADDRESS: "auto"
+      RAY_NAMESPACE: "default"
+      RAY_AUTH_MODE: "disabled"
+
+      # ASR worker configuration
+      ASR_GPU_COUNT: "${ASR_GPU_COUNT:-1}"
+      ASR_WORKER_NUM_GPUS: "${ASR_WORKER_NUM_GPUS:-1}"
+      ASR_WORKER_NUM_CPUS: "${ASR_WORKER_NUM_CPUS:-4}"
+      ASR_ROUTER_NUM_CPUS: "${ASR_ROUTER_NUM_CPUS:-1}"
+
+      # Qwen ASR
+      ASR_MODEL_NAME: "${ASR_MODEL_NAME:-Qwen/Qwen3-ASR-1.7B-hf}"
+      ASR_MAX_MODEL_LEN: "${ASR_MAX_MODEL_LEN:-8192}"
+      ASR_GPU_MEMORY_UTILIZATION: "${ASR_GPU_MEMORY_UTILIZATION:-0.90}"
+      ASR_MAX_CONCURRENT_REQUESTS: "${ASR_MAX_CONCURRENT_REQUESTS:-8}"
+
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+
+    ports:
+      # Ray dashboard, local machine only
+      - "127.0.0.1:8265:8265"
+
+    networks:
+      - asr-network
+
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import socket; s=socket.create_connection(('127.0.0.1',6379),5); s.close()"
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.gateway
+
+    container_name: asr-gateway
+    hostname: asr-gateway
+    restart: unless-stopped
+    init: true
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: "/app"
+
+      # Connect to the ASR engine's Ray cluster
+      RAY_ADDRESS: "asr-engine:6379"
+      RAY_NAMESPACE: "default"
+      RAY_AUTH_MODE: "disabled"
+
+      SERVE_APP_NAME: "${SERVE_APP_NAME:-default}"
+
+      # FireRedVAD
+      VAD_USE_GPU: "${VAD_USE_GPU:-false}"
+      VAD_MODEL_DIR: "/app/deployment/pretrained_models/FireRedVAD/Stream-VAD"
+
+    ports:
+      - "${GATEWAY_PORT:-8090}:8090"
+
+    depends_on:
+      asr-engine:
+        condition: service_healthy
+
+    networks:
+      - asr-network
+
+networks:
+  asr-network:
+    driver: bridge
+
+volumes:
+  hf-cache:

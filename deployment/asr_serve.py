@@ -26,6 +26,57 @@ logging.basicConfig(
 logger = logging.getLogger("asr_serve")
 
 
+# ============================================================
+# Resource Configuration
+# ============================================================
+
+# Total GPUs available to ASR.
+# One worker is created per configured GPU.
+ASR_GPU_COUNT = int(
+    os.getenv("ASR_GPU_COUNT", "1")
+)
+
+# GPU resources reserved by each worker actor.
+ASR_WORKER_NUM_GPUS = float(
+    os.getenv("ASR_WORKER_NUM_GPUS", "1")
+)
+
+# CPU resources reserved by each worker actor.
+ASR_WORKER_NUM_CPUS = float(
+    os.getenv("ASR_WORKER_NUM_CPUS", "4")
+)
+
+# Router state is stored in local memory.
+# Keep exactly one replica until session routing is moved
+# to shared storage or another coordinated mechanism.
+ASR_ROUTER_NUM_REPLICAS = 1
+
+ASR_ROUTER_NUM_CPUS = float(
+    os.getenv("ASR_ROUTER_NUM_CPUS", "1")
+)
+
+
+# ============================================================
+# Resource Validation
+# ============================================================
+
+if ASR_GPU_COUNT < 1:
+    raise ValueError("ASR_GPU_COUNT must be >= 1")
+
+if ASR_WORKER_NUM_GPUS <= 0:
+    raise ValueError("ASR_WORKER_NUM_GPUS must be > 0")
+
+if ASR_WORKER_NUM_CPUS <= 0:
+    raise ValueError("ASR_WORKER_NUM_CPUS must be > 0")
+
+if ASR_ROUTER_NUM_CPUS <= 0:
+    raise ValueError("ASR_ROUTER_NUM_CPUS must be > 0")
+
+
+# ============================================================
+# Model Configuration
+# ============================================================
+
 ASR_MODEL_NAME = os.getenv(
     "ASR_MODEL_NAME",
     "Qwen/Qwen3-ASR-1.7B-hf",
@@ -56,7 +107,6 @@ ASR_GPU_MEMORY_UTILIZATION = float(
 )
 
 # Concurrent inference submissions per GPU worker.
-# Benchmark 4, 8 and 16.
 ASR_MAX_CONCURRENT_REQUESTS = int(
     os.getenv("ASR_MAX_CONCURRENT_REQUESTS", "8")
 )
@@ -64,11 +114,6 @@ ASR_MAX_CONCURRENT_REQUESTS = int(
 # Ray actor concurrency.
 ASR_ACTOR_MAX_CONCURRENCY = int(
     os.getenv("ASR_ACTOR_MAX_CONCURRENCY", "64")
-)
-
-# Actor CPU reservation.
-ASR_WORKER_NUM_CPUS = float(
-    os.getenv("ASR_WORKER_NUM_CPUS", "2")
 )
 
 SPECULATIVE_CONFIG = {
@@ -81,7 +126,7 @@ SPECULATIVE_CONFIG = {
 # ============================================================
 # GPU Worker
 #
-# One actor = one GPU = one Qwen3-ASR model.
+# One actor = one Qwen3-ASR model.
 #
 # Responsibilities:
 # - Model lifecycle
@@ -93,7 +138,7 @@ SPECULATIVE_CONFIG = {
 # ============================================================
 
 @ray.remote(
-    num_gpus=1,
+    num_gpus=ASR_WORKER_NUM_GPUS,
     num_cpus=ASR_WORKER_NUM_CPUS,
     max_concurrency=ASR_ACTOR_MAX_CONCURRENCY,
 )
@@ -157,7 +202,6 @@ class ASRWorker:
         session: dict,
     ):
 
-        # Important:
         # A session might have been cancelled while this
         # request was waiting for its session lock.
         if self.sessions.get(session_id) is not session:
@@ -507,9 +551,9 @@ class ASRWorker:
 # ============================================================
 
 @serve.deployment(
-    num_replicas=1,
+    num_replicas=ASR_ROUTER_NUM_REPLICAS,
     ray_actor_options={
-        "num_cpus": 1,
+        "num_cpus": ASR_ROUTER_NUM_CPUS,
     },
     max_ongoing_requests=1000,
 )
@@ -737,22 +781,45 @@ class ASRRouter:
 #
 # Deployment:
 #
-# serve run asr_serve:build_app num_workers=1
+# ASR_GPU_COUNT=2 \
+# ASR_WORKER_NUM_GPUS=1 \
+# ASR_WORKER_NUM_CPUS=4 \
+# ASR_ROUTER_NUM_CPUS=1 \
+# serve run asr_serve:build_app
 #
-# Two GPUs:
-#
-# serve run asr_serve:build_app num_workers=2
+# Or override GPU count through the Serve builder argument:
+# serve run asr_serve:build_app gpu_count=2
 # ============================================================
 
-def build_app(args: dict):
+def build_app(args: dict = None):
 
-    num_workers = int(
-        args.get("num_workers", 1)
+    args = args or {}
+
+    # Explicit Serve builder argument overrides the environment variable.
+    gpu_count = int(
+        args.get("gpu_count", ASR_GPU_COUNT)
     )
 
+    if gpu_count < 1:
+        raise ValueError("gpu_count must be >= 1")
+
+    # One worker is created per configured GPU.
+    num_workers = gpu_count
+
     logger.info(
-        "Building ASR application | num_workers=%s",
+        "Building ASR application | "
+        "gpu_count=%s | "
+        "worker_count=%s | "
+        "worker_gpus_per_actor=%s | "
+        "worker_cpus=%s | "
+        "router_replicas=%s | "
+        "router_cpus=%s",
+        gpu_count,
         num_workers,
+        ASR_WORKER_NUM_GPUS,
+        ASR_WORKER_NUM_CPUS,
+        ASR_ROUTER_NUM_REPLICAS,
+        ASR_ROUTER_NUM_CPUS,
     )
 
     return ASRRouter.bind(

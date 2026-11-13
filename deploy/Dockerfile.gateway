@@ -1,0 +1,44 @@
+
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app \
+    GATEWAY_HOST=0.0.0.0 \
+    GATEWAY_PORT=8000 \
+    VAD_USE_GPU=false \
+    VAD_MODEL_DIR=/app/pretrained_models/FireRedVAD/Stream-VAD
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    build-essential \
+    git \
+    ffmpeg \
+    libsndfile1 \
+    libgomp1 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+RUN python -m pip install --upgrade pip setuptools wheel
+
+COPY requirements/requirements-gateway.txt /app/requirements-gateway.txt
+
+RUN python -m pip install -r /app/requirements-gateway.txt
+
+# Download pretrained FireRedVAD model
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='FireRedTeam/FireRedVAD', local_dir='/app/pretrained_models/FireRedVAD')"
+
+COPY gateway.py /app/gateway.py
+
+EXPOSE 8000
+
+CMD ["uvicorn", "gateway:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--ws", "websockets", "--ws-max-size", "67584", "--ws-ping-interval", "20", "--ws-ping-timeout", "120"]

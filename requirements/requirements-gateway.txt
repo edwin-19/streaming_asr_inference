@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+
+fireredvad[gpu]
+huggingface_hub
+boto3
+
+# Must match the Ray cluster version.
+ray[serve]
+soundfile
+librosa

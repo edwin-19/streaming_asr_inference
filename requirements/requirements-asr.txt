@@ -1,0 +1,7 @@
+# Ray Serve
+ray[serve]
+
+# Audio processing
+numpy
+soundfile
+librosa
